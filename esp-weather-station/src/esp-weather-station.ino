@@ -15,6 +15,7 @@
    Changelog:
    0.01 - new code
    0.02 - new code using async webserver; add'd firmware update page
+   0.03 - add'd ds18b20 sensor for pool and air; updated println text for server info; add'd multiple DS18B20 sensors
 */
 
 //inlcudes
@@ -31,17 +32,23 @@
 #endif
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <DallasTemperature.h>
 #include <ESPAsyncWebServer.h>
 #include <WiFiUdp.h>
+#include <OneWire.h>
 #include <Wire.h>
 #include "credentials.h"
 #include "webpages.h"
 
 //constants-variables
-const String ver = "ESP Weather Station - v0.02";
+const String ver = "ESP Weather Station - v0.03";
 #define SEALEVELPRESSURE_HPA (1013.25)
 Adafruit_BME280 bme;
-//float temperature, humidity, pressure, altitude;
+#define ONE_WIRE_BUS 4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+int numberOfDevices;
+DeviceAddress tempDeviceAddress;
 const char *host = "ESP-WEATHER"; //change to your desired hostname
 AsyncWebServer server(80);
 size_t content_len;
@@ -50,6 +57,8 @@ float tempF;
 float presEng;
 float altF;
 float relHum;
+//#define WindSpeedSensorPin 2  //coming soon!
+//#define WindDirSensorPin 15   //coming soon!
 
 
 float getBME(){
@@ -128,6 +137,39 @@ void RSSIdBm() {
   delay(10000);
 }
 
+String DSTempProcessor(const String& var) {
+  if (var == "DSPOOLTEMPERATUREF") {
+    return readDSPoolTemperatureF();
+  }else if(var == "DSAIRTEMPERATUREF"){
+    return readDSAirTemperatureF();
+  }
+  return String();
+}
+
+String readDSPoolTemperatureF(){
+  sensors.requestTemperatures();
+  float DSPoolTempF = sensors.getTempFByIndex(1);
+
+  if (int(DSPoolTempF) == -196) {
+    Serial.println("Failed to read from DS18B20 sensor");
+    return "--";
+  } else {
+  }
+  return String(DSPoolTempF);
+}
+
+String readDSAirTemperatureF(){
+  sensors.requestTemperatures();
+  float DSAirTempF = sensors.getTempFByIndex(0);
+
+  if (int(DSAirTempF) == -196) {
+    Serial.println("Failed to read from DS18B20 sensor");
+    return "--";
+  } else {
+  }
+  return String(DSAirTempF);
+}
+
 String readBMETemperatureF() {
   getBME();
   if(tempF == -196.00) {
@@ -178,13 +220,25 @@ void rootServer(){
     request->send_P(200, "text/plain", readBMEHum().c_str());
   });
 
+  server.on("/pool", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/html", pool_html, DSTempProcessor);
+  });
+
+  server.on("/dspooltemperaturef", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/plain", readDSPoolTemperatureF().c_str());
+  });
+
+  server.on("/dsairtemperaturef", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/plain", readDSAirTemperatureF().c_str());
+  });
+
   //start server
   server.begin();
 
   MDNS.begin(host);
   if(webInit()) MDNS.addService("http", "tcp", 80);
   Serial.println("HTTP server started");
-  Serial.printf("Ready! To update firmware, open http://%s.local/firmware in your browser!\n", host);
+  Serial.printf("Ready to update firmware, open http://%s.local/firmware in your browser!\n", host);
   Serial.printf("Otherwise to open the root page, open http://%s.local in your browser!\n", host);
 }
 
@@ -253,11 +307,36 @@ boolean webInit(){
 #endif
 }
 
-void setup(){
-  //start serial
-  Serial.begin(115200);
+void DSSensors(){
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  
+  // Loop through each device, print out temperature data
+  for(int i=0;i<numberOfDevices; i++){
+    // Search the wire for address
+    if(sensors.getAddress(tempDeviceAddress, i)){
+      // Output the device ID
+      Serial.print("Temperature for device: ");
+      Serial.println(i,DEC);
+      // Print the data
+      float tempC = sensors.getTempC(tempDeviceAddress);
+      Serial.print("Temp C: ");
+      Serial.print(tempC);
+      Serial.print(" Temp F: ");
+      Serial.println(DallasTemperature::toFahrenheit(tempC)); // Converts tempC to Fahrenheit
+    }
+  }
+}
 
-  bool status;
+void printAddress(DeviceAddress deviceAddress) {
+  for (uint8_t i = 0; i < 8; i++){
+    if (deviceAddress[i] < 16) Serial.print("0");
+      Serial.print(deviceAddress[i], HEX);
+  }
+}
+
+void setup(){
+   //start serial
+  Serial.begin(115200);
 
   //print sketch information
   Serial.println("Created by Anthony Sleck");
@@ -265,9 +344,36 @@ void setup(){
   Serial.println(ver);
   Serial.println("github - https://github.com/anthonysleck");
 
-  //connect to sensor
+  //DSsensors
+  sensors.begin();
+
+  delay(1000);
+
+  numberOfDevices = sensors.getDeviceCount();
+
+  Serial.print("Locating devices...");
+  Serial.print("Found ");
+  Serial.print(numberOfDevices, DEC);
+  Serial.println(" devices.");
+
+  for(int i=0;i<numberOfDevices; i++){
+    // Search the wire for address
+    if(sensors.getAddress(tempDeviceAddress, i)){
+      Serial.print("Found device ");
+      Serial.print(i, DEC);
+      Serial.print(" with address: ");
+      printAddress(tempDeviceAddress);
+      Serial.println();
+    } else {
+      Serial.print("Found ghost device at ");
+      Serial.print(i, DEC);
+      Serial.print(" but could not detect address. Check power and cabling");
+    }
+  }
+ 
+  //connect to BME280
+  delay(1000);
   bme.begin(0x76);
-  //getBME();
 
   //connect to WiFi
   WiFiConnect();
@@ -286,4 +392,5 @@ void loop(){
   }
 
   RSSIdBm();
+  DSSensors();
 }
